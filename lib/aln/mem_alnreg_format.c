@@ -95,10 +95,10 @@ static void mem_alnreg_setSAM(const mem_opt_t *opt, const bntseq_t *bns, const u
   }
 
   // add clipping to CIGAR
-  if (reg->qb != 0 || reg->qe != s->l_seq) {
+  if (reg->qb != 0 || reg->qe != s->l_seq || s->l_adaptor) {
     int clip5, clip3;
-    clip5 = reg->is_rev ? s->l_seq - reg->qe : reg->qb;
-    clip3 = reg->is_rev ? reg->qb : s->l_seq - reg->qe;
+    clip5 = reg->is_rev ? s->l_seq - reg->qe + s->l_adaptor : reg->qb;
+    clip3 = reg->is_rev ? reg->qb : s->l_seq - reg->qe + s->l_adaptor;
     cigar = realloc(cigar, 4 * (n_cigar + 2) + l_MD);
     if (clip5) {
       memmove(cigar+1, cigar, n_cigar * 4 + l_MD); // make room for 5'-end clipping
@@ -264,7 +264,7 @@ void mem_alnreg_formatSAM(const mem_opt_t *opt, const bntseq_t *bns, const uint8
 
   // print up to CIGAR
   int l_name = strlen(s->name);
-  ks_resize(str, str->l + s->l_seq + l_name + (s->qual ? s->l_seq : 0) + 20);
+  ks_resize(str, str->l + s->l_seq + s->l_adaptor + l_name + (s->qual ? s->l_seq + s->l_adaptor : 0) + 20);
   kputsn(s->name, l_name, str); kputc('\t', str); // read name, QNAME
   kputw((p.flag & 0xffff) | (p.flag & 0x10000 ? 0x100 : 0), str); kputc('\t', str); // FLAG
   if (p.rid >= 0) { // with coordinate
@@ -315,7 +315,7 @@ void mem_alnreg_formatSAM(const mem_opt_t *opt, const bntseq_t *bns, const uint8
   } else if (p.is_rev) { // the reverse strand
 
     // SEQ
-    int i, qb = 0, qe = s->l_seq;
+    int i, qb = 0, qe = s->l_seq + s->l_adaptor;
     if (p.n_cigar && !is_primary && !(opt->flag&MEM_F_SOFTCLIP) && !p.is_alt) { // hard clip
       if ((p.cigar[0]&0xf) == 4 || (p.cigar[0]&0xf) == 3) qe -= p.cigar[0]>>4;
       if ((p.cigar[p.n_cigar-1]&0xf) == 4 || (p.cigar[p.n_cigar-1]&0xf) == 3) qb += p.cigar[p.n_cigar-1]>>4;
@@ -334,7 +334,7 @@ void mem_alnreg_formatSAM(const mem_opt_t *opt, const bntseq_t *bns, const uint8
   } else {                // the forward strand
 
     // SEQ
-    int i, qb = 0, qe = s->l_seq;
+    int i, qb = 0, qe = s->l_seq + s->l_adaptor;
     if (p.n_cigar && !is_primary && !(opt->flag&MEM_F_SOFTCLIP) && !p.is_alt) { // hard clip
       if ((p.cigar[0]&0xf) == 4 || (p.cigar[0]&0xf) == 3) qb += p.cigar[0]>>4;
       if ((p.cigar[p.n_cigar-1]&0xf) == 4 || (p.cigar[p.n_cigar-1]&0xf) == 3) qe -= p.cigar[p.n_cigar-1]>>4;
@@ -369,6 +369,8 @@ void mem_alnreg_formatSAM(const mem_opt_t *opt, const bntseq_t *bns, const uint8
   if (regs0) mem_alnreg_tagSA(opt, bns, pac, s, p0, regs0, str);
   // PA: ratio of score / alt_score, higher the ratio, the more accurate the position
   if (is_primary && p.alt_sc > 0) ksprintf(str, "\tPA:f:%.3f", (double) p.score / p.alt_sc); // used to be lowercase pa, just to be consistent
+  // XL: read length excluding adaptor
+  kputsn("\tXL:i:", 6, str); kputw(s->l_seq, str);
   // XA and XB: alternative (secondary) alignment
   if (regs0) mem_alnreg_tagXAXB(opt, bns, pac, s, p0, regs0, str);
   if (s->comment) { kputc('\t', str); kputs(s->comment, str); }
@@ -546,7 +548,7 @@ void mem_reg2sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pa
 
   // Actual pairing and set mapQ
   int pscore, sub_pscore; // best and 2nd best pairing score
-  int n_subpairings; int z[2];
+  int n_subpairings; int z[2] = {0};
   mem_pair(opt, bns, pes, regs_pair, id, &pscore, &sub_pscore, &n_subpairings, z);
   if (pscore <= 0) return mem_reg2sam_pe_nopairing(opt, bns, pac, s, regs_pair, pes);
 
@@ -559,7 +561,7 @@ void mem_reg2sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pa
         p1->score, p1->qb, p1->qe, (long)p1->rb, (long)p1->re, bns->anns[p1->rid].name, p1->pos,
         p2->score, p2->qb, p2->qe, (long)p2->rb, (long)p2->re, bns->anns[p2->rid].name, p2->pos);
   }
-
+  
   // opt->pen_unpaired - penalty for not pairing
   int score_unpaired = regs_pair[0].a[0].score + regs_pair[1].a[0].score - opt->pen_unpaired;
   if (pscore > score_unpaired) { // use z for pairing
@@ -612,8 +614,9 @@ void mem_reg2sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pa
   }
 
   // set SAM
-  for (i = 0; i < 2; ++i)
+  for (i = 0; i < 2; ++i) {
     mem_alnreg_setSAM(opt, bns, pac, &s[i], &regs_pair[i].a[z[i]]);
+  }
 
   // write SAM
   for (i = 0; i < 2; ++i) {
